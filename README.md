@@ -1,4 +1,36 @@
-# MCH2022 template app
+# Bad Apple on the MCH Badge
+
+As is required by the intergaltic laws, this is bad apple running on the MCH
+badge.
+
+Code is terrible, requires a downscaled video. Feel bad as i had to do the
+encode on a chromebook.
+
+## Setup
+
+* Copy `out.bin` onto a FAT formated SD card.
+* Place into the SD card in the badge.
+* `make install` to copy this over to your device and install the dependencies
+  (or install from the hacherie)
+
+## How does this work?
+
+basically, reads 2400ish bytes from out.bin every frame, and upscales and
+displays them using a PAX shader.
+
+yes, this is terrible.
+
+## Making the video file
+
+I downloaded bad apple off of youtube, removed audio, set to 10fps, 
+
+Did something like:
+```
+ffmpeg -i bad-apple-raw.mp4 -s 160x120 -vcodec copy -an -filter:v fps=10 out-halfrez-10fps.mp4
+```
+Then ran `assets/test.py` to get the out.bin.
+
+## Below is the original README
 
 This repository contains a template app for the MCH2022 badge.
 It is intended to be used as the basis for developing your own native ESP32

@@ -9,12 +9,20 @@
 // native Badge apps on.
 
 #include "main.h"
+#include "sdcard.h"
 
 static pax_buf_t buf;
 xQueueHandle buttonQueue;
 
 #include <esp_log.h>
-static const char *TAG = "mch2022-demo-app";
+static const char *TAG = "bahorn-test";
+
+#define VIDEO_WIDTH 160
+#define VIDEO_HEIGHT 120
+struct funargs {
+    int t;
+    char frame[2400];
+} fun;
 
 // Updates the screen with the latest buffer.
 void disp_flush() {
@@ -27,8 +35,37 @@ void exit_to_launcher() {
     esp_restart();
 }
 
+pax_col_t my_shader_callback(pax_col_t tint, int x, int y, float u, float v, void *args) {
+    struct funargs *funa = (struct funargs *)args;
+    // now do a lookup
+    int value = 0;
+    int new_x = x/2;
+    int new_y = y/2;
+    char bit = 1 << (7 - ((x/2) % 8));
+    if ((funa->frame[(VIDEO_WIDTH/8)*new_y + new_x/8] & bit) > 0) {
+        value = 1;
+    }
+    
+    return pax_col_rgb(value*255, value*255, value*255);
+}
+
+pax_shader_t my_shader = (pax_shader_t) {
+    .callback          = my_shader_callback,
+    .callback_args     = &fun,
+    .alpha_promise_0   = false,
+    .alpha_promise_255 = true
+};
+
 void app_main() {
-  
+
+    esp_err_t res  = mount_sd(GPIO_SD_CMD, GPIO_SD_CLK, GPIO_SD_D0, GPIO_SD_PWR, "/sd", false, 5);
+    if(res != ESP_OK) ESP_LOGE(TAG, "could not mount SD card");
+
+
+    FILE *fd = fopen("/sd/out.bin", "rb");
+
+    fread(&(fun.frame), 2400, 1, fd);
+
     
     ESP_LOGI(TAG, "Welcome to the template app!");
 
@@ -49,27 +86,29 @@ void app_main() {
     
     // Initialize WiFi. This doesn't connect to Wifi yet.
     wifi_init();
+
+    fun.t = 128;
     
     while (1) {
-        // Pick a random background color.
-        int hue = esp_random() & 255;
-        pax_col_t col = pax_col_hsv(hue, 255 /*saturation*/, 255 /*brighness*/);
-        
-        // Greet the World in front of a random background color! 
-        // Fill the background with the random color.
-        pax_background(&buf, col);
-        
-        // This text is shown on screen.
-        char             *text = "Hello, MCH2022!";
-        
+        fun.t += 10;
+
+        if (fread(&(fun.frame), 2400, 1, fd) != 1) {
+            rewind(fd);
+            fread(&(fun.frame), 2400, 1, fd);
+        }
+
+        pax_shade_rect(&buf, -1, &my_shader, NULL, 0, 0, 360, 240);
+        char text[256];
+        sprintf(text, "%i", fun.t);
         // Pick the font (Saira is the only one that looks nice in this size).
         const pax_font_t *font = pax_font_saira_condensed;
 
         // Determine how the text dimensions so we can display it centered on
         // screen.
-        pax_vec1_t        dims = pax_text_size(font, font->default_size, text);
+        //pax_vec1_t        dims = pax_text_size(font, font->default_size, text);
 
         // Draw the centered text.
+        /*
         pax_draw_text(
             &buf, // Buffer to draw to.
             0xff000000, // color
@@ -80,22 +119,9 @@ void app_main() {
             // The text to be rendered.
             text
         );
+        */
 
         // Draws the entire graphics buffer to the screen.
         disp_flush();
-        
-        // Wait for button presses and do another cycle.
-        
-        // Structure used to receive data.
-        rp2040_input_message_t message;
-        
-        // Wait forever for a button press (because of portMAX_DELAY)
-        xQueueReceive(buttonQueue, &message, portMAX_DELAY);
-        
-        // Which button is currently pressed?
-        if (message.input == RP2040_INPUT_BUTTON_HOME && message.state) {
-            // If home is pressed, exit to launcher.
-            exit_to_launcher();
-        }
     }
 }
