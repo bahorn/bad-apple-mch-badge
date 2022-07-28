@@ -9,7 +9,10 @@
 // native Badge apps on.
 
 #include "main.h"
+#include "pax_gfx.h"
 #include "sdcard.h"
+
+#include <string.h>
 
 static pax_buf_t buf;
 xQueueHandle buttonQueue;
@@ -17,12 +20,99 @@ xQueueHandle buttonQueue;
 #include <esp_log.h>
 static const char *TAG = "bahorn-test";
 
-#define VIDEO_WIDTH 160
-#define VIDEO_HEIGHT 120
+#define VIDEO_WIDTH 320
+#define VIDEO_HEIGHT 240
+
+#define FRAME_SIZE 9600
+#define BATCH_SIZE 32
+#define BATCH_COUNT 8
+
 struct funargs {
+    FILE *fd;
+    bool requested;
+    bool reset;
     int t;
-    char frame[2400];
+    int next_batch;
+    int remaining;
+    char * buffer;
 } fun;
+
+
+void draw_frame() {
+    //memset(buf.buf_16bpp, 0, VIDEO_WIDTH * VIDEO_HEIGHT * sizeof(uint16_t));
+    for (int y = 0; y < VIDEO_HEIGHT; y++) {
+        for (int x = 0; x < VIDEO_WIDTH; x++) {
+            char bit = 1 << (7 - ((x) % 8));
+            char frame = fun.buffer[
+                FRAME_SIZE * fun.t + (VIDEO_WIDTH/8) * y + x / 8
+            ];
+            uint16_t col = 0xffff * ((frame & bit) > 0);
+            buf.buf_16bpp[y * VIDEO_WIDTH + x] = col;
+        }
+
+    }
+
+}
+
+void load_batch(bool initial) {
+    // only load more every BATCH_SIZE
+    int res;
+
+    // need to copy two buffers in at once.
+    if (initial) {
+        ESP_LOGI(TAG, "Setting up! %i bbp @ %i x %i", buf.bpp, buf.width, buf.height);
+        res = fread(
+            fun.buffer,
+            FRAME_SIZE,
+            BATCH_SIZE * BATCH_COUNT,
+            fun.fd
+        );
+        ESP_LOGI(TAG, "Res: %i", res);
+        fun.t = 0;
+        fun.next_batch = 0;
+        fun.remaining = res;
+        fun.requested = false;
+        fun.reset = false;
+        return;
+    }
+
+    /* Load more frames */
+    ESP_LOGI(TAG, "Loading more for batch: %i, remaining %i", fun.next_batch, fun.remaining);
+    res = fread(
+        &(fun.buffer[fun.next_batch * BATCH_SIZE * FRAME_SIZE]),
+        FRAME_SIZE,
+        BATCH_SIZE,
+        fun.fd
+    );
+    fun.remaining += res;
+    fun.next_batch += 1;
+    fun.next_batch %= BATCH_COUNT;
+    fun.requested = false;
+    fun.reset = false;
+
+    // if we are out of frames, go back to the start.
+    if (fun.remaining == 0) {
+        ESP_LOGI(TAG, "Rewind");
+        fun.reset = true;
+    }
+}
+
+bool read_frame() {
+    if (!fun.requested && fun.remaining < ((BATCH_SIZE * (BATCH_COUNT - 1))))
+    {
+        fun.requested = true;
+    }
+    if (fun.remaining <= 0) {
+        ESP_LOGI(TAG, "DELAY!");
+        return false;
+    }
+    draw_frame();
+    fun.t += 1;
+    fun.t %= (BATCH_SIZE * BATCH_COUNT);
+    fun.remaining -= 1;
+
+    return true;
+}
 
 // Updates the screen with the latest buffer.
 void disp_flush() {
@@ -35,93 +125,61 @@ void exit_to_launcher() {
     esp_restart();
 }
 
-pax_col_t my_shader_callback(pax_col_t tint, int x, int y, float u, float v, void *args) {
-    struct funargs *funa = (struct funargs *)args;
-    // now do a lookup
-    int value = 0;
-    int new_x = x/2;
-    int new_y = y/2;
-    char bit = 1 << (7 - ((x/2) % 8));
-    if ((funa->frame[(VIDEO_WIDTH/8)*new_y + new_x/8] & bit) > 0) {
-        value = 1;
+void loadData(void * pvParameters)
+{
+    while (true) {
+        if (fun.requested) {
+            if (fun.reset && fun.remaining == 0) {
+                rewind(fun.fd);
+                load_batch(true);
+            } else {
+                load_batch(false);
+            }
+        }
     }
-    
-    return pax_col_rgb(value*255, value*255, value*255);
 }
 
-pax_shader_t my_shader = (pax_shader_t) {
-    .callback          = my_shader_callback,
-    .callback_args     = &fun,
-    .alpha_promise_0   = false,
-    .alpha_promise_255 = true
-};
 
 void app_main() {
+    esp_err_t res  = mount_sd(
+        GPIO_SD_CMD,
+        GPIO_SD_CLK,
+        GPIO_SD_D0,
+        GPIO_SD_PWR,
+        "/sd",
+        false,
+        5
+    );
 
-    esp_err_t res  = mount_sd(GPIO_SD_CMD, GPIO_SD_CLK, GPIO_SD_D0, GPIO_SD_PWR, "/sd", false, 5);
     if(res != ESP_OK) ESP_LOGE(TAG, "could not mount SD card");
 
+    ESP_LOGI(TAG, "Starting bad apple!!");
 
-    FILE *fd = fopen("/sd/out.bin", "rb");
-
-    fread(&(fun.frame), 2400, 1, fd);
-
-    
-    ESP_LOGI(TAG, "Welcome to the template app!");
-
-    // Initialize the screen, the I2C and the SPI busses.
     bsp_init();
-
-    // Initialize the RP2040 (responsible for buttons, etc).
     bsp_rp2040_init();
-    
-    // This queue is used to receive button presses.
-    buttonQueue = get_rp2040()->queue;
-    
-    // Initialize graphics for the screen.
     pax_buf_init(&buf, NULL, 320, 240, PAX_BUF_16_565RGB);
-    
-    // Initialize NVS.
     nvs_flash_init();
-    
-    // Initialize WiFi. This doesn't connect to Wifi yet.
-    wifi_init();
 
-    fun.t = 128;
+    fun.fd = fopen("/sd/out.bin", "rb");
+    fun.buffer = malloc(FRAME_SIZE * BATCH_SIZE * BATCH_COUNT);
     
-    while (1) {
-        fun.t += 10;
+    load_batch(true);
+    
+    /* Start the second thread */
+    TaskHandle_t xDataLoader = NULL;
+    xTaskCreatePinnedToCore(
+        loadData,
+        "SDFETCH",
+        8192,
+        NULL,
+        32,
+        &xDataLoader,
+        1
+    );
 
-        if (fread(&(fun.frame), 2400, 1, fd) != 1) {
-            rewind(fd);
-            fread(&(fun.frame), 2400, 1, fd);
+    while (true) {
+        if (read_frame()) {
+            disp_flush();
         }
-
-        pax_shade_rect(&buf, -1, &my_shader, NULL, 0, 0, 360, 240);
-        char text[256];
-        sprintf(text, "%i", fun.t);
-        // Pick the font (Saira is the only one that looks nice in this size).
-        const pax_font_t *font = pax_font_saira_condensed;
-
-        // Determine how the text dimensions so we can display it centered on
-        // screen.
-        //pax_vec1_t        dims = pax_text_size(font, font->default_size, text);
-
-        // Draw the centered text.
-        /*
-        pax_draw_text(
-            &buf, // Buffer to draw to.
-            0xff000000, // color
-            font, font->default_size, // Font and size to use.
-            // Position (top left corner) of the app.
-            (buf.width  - dims.x) / 2.0,
-            (buf.height - dims.y) / 2.0,
-            // The text to be rendered.
-            text
-        );
-        */
-
-        // Draws the entire graphics buffer to the screen.
-        disp_flush();
     }
 }

@@ -1,9 +1,11 @@
 import cv2
+import sys
+import numpy as np
 from bitarray import bitarray
 
 # Create a VideoCapture object and read from input file
 # If the input is the camera, pass 0 instead of the video file name
-cap = cv2.VideoCapture('video/out-halfrez-10fps.mp4')
+cap = cv2.VideoCapture(sys.argv[1], cv2.IMREAD_GRAYSCALE)
 
 # Check if camera opened successfully
 if not cap.isOpened():
@@ -20,18 +22,13 @@ while(cap.isOpened()):
     ret, frame = cap.read()
     count += 1
     if ret:
-        _, res = cv2.threshold(frame, 127, 255, cv2.THRESH_BINARY)
-        # Display the resulting frame
-        cv2.imshow('Frame', res)
+        data += list(cv2.threshold(frame, 128, 255,
+                cv2.THRESH_BINARY)[1].flatten()[::3] > 128)
 
-        for row in res:
-            data += list(map(
-                lambda x: 1 if x == 255 else 0,
-                [pixel[0] for pixel in row]
-            ))
+        
         # Press Q on keyboard to  exit
-        if cv2.waitKey(25) & 0xFF == ord('q'):
-            break
+        #if cv2.waitKey(25) & 0xFF == ord('q'):
+        #    break
     # Break the loop
     else:
         break
