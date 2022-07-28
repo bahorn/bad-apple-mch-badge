@@ -16,6 +16,7 @@
 
 static pax_buf_t buf;
 xQueueHandle buttonQueue;
+ILI9341 *disp;
 
 #include <esp_log.h>
 static const char *TAG = "bahorn-test";
@@ -25,8 +26,13 @@ static const char *TAG = "bahorn-test";
 
 #define FRAME_SIZE 9600
 #define BATCH_SIZE 32
-#define BATCH_COUNT 8
+#define BATCH_COUNT 2
 
+#define DRAW_BUFFERS 16
+
+int idx;
+uint16_t *buffers[DRAW_BUFFERS];
+int avaliable;
 struct funargs {
     FILE *fd;
     bool requested;
@@ -38,8 +44,7 @@ struct funargs {
 } fun;
 
 
-void draw_frame() {
-    //memset(buf.buf_16bpp, 0, VIDEO_WIDTH * VIDEO_HEIGHT * sizeof(uint16_t));
+void draw_frame(int buf_idx) {
     for (int y = 0; y < VIDEO_HEIGHT; y++) {
         for (int x = 0; x < VIDEO_WIDTH; x++) {
             char bit = 1 << (7 - ((x) % 8));
@@ -47,11 +52,9 @@ void draw_frame() {
                 FRAME_SIZE * fun.t + (VIDEO_WIDTH/8) * y + x / 8
             ];
             uint16_t col = 0xffff * ((frame & bit) > 0);
-            buf.buf_16bpp[y * VIDEO_WIDTH + x] = col;
+            buffers[buf_idx][y * VIDEO_WIDTH + x] = col;
         }
-
     }
-
 }
 
 void load_batch(bool initial) {
@@ -60,7 +63,7 @@ void load_batch(bool initial) {
 
     // need to copy two buffers in at once.
     if (initial) {
-        ESP_LOGI(TAG, "Setting up! %i bbp @ %i x %i", buf.bpp, buf.width, buf.height);
+        ESP_LOGI(TAG, "Setting up! %i bbp @ %i x %i", 16, VIDEO_WIDTH, VIDEO_HEIGHT);
         res = fread(
             fun.buffer,
             FRAME_SIZE,
@@ -97,7 +100,7 @@ void load_batch(bool initial) {
     }
 }
 
-bool read_frame() {
+bool read_frame(int frame_idx) {
     if (!fun.requested && fun.remaining < ((BATCH_SIZE * (BATCH_COUNT - 1))))
     {
         fun.requested = true;
@@ -106,7 +109,7 @@ bool read_frame() {
         ESP_LOGI(TAG, "DELAY!");
         return false;
     }
-    draw_frame();
+    draw_frame(frame_idx);
     fun.t += 1;
     fun.t %= (BATCH_SIZE * BATCH_COUNT);
     fun.remaining -= 1;
@@ -116,7 +119,7 @@ bool read_frame() {
 
 // Updates the screen with the latest buffer.
 void disp_flush() {
-    ili9341_write(get_ili9341(), buf.buf);
+    ili9341_write(disp, (uint8_t*) buffers[idx]);
 }
 
 // Exits the app, returning to the launcher.
@@ -136,11 +139,31 @@ void loadData(void * pvParameters)
                 load_batch(false);
             }
         }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
+void renderLoop(void * pvParameters)
+{
+    avaliable = 0;
+    int k = 0;
+    while (true) {
+        if (avaliable < DRAW_BUFFERS) {
+            read_frame(k);
+            avaliable += 1;
+            k += 1;
+            k %= DRAW_BUFFERS;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
 
 void app_main() {
+    ESP_LOGI(TAG, "Starting bad apple!!");
+
+    bsp_init();
+    bsp_rp2040_init();
+
     esp_err_t res  = mount_sd(
         GPIO_SD_CMD,
         GPIO_SD_CLK,
@@ -153,11 +176,14 @@ void app_main() {
 
     if(res != ESP_OK) ESP_LOGE(TAG, "could not mount SD card");
 
-    ESP_LOGI(TAG, "Starting bad apple!!");
+    idx = 0;
+    
+    disp = get_ili9341();
+    // allocate buffers 
+    for (int i = 0; i < DRAW_BUFFERS; i++) {
+        buffers[i] = malloc(sizeof(uint16_t) * VIDEO_WIDTH * VIDEO_HEIGHT);
+    }
 
-    bsp_init();
-    bsp_rp2040_init();
-    pax_buf_init(&buf, NULL, 320, 240, PAX_BUF_16_565RGB);
     nvs_flash_init();
 
     fun.fd = fopen("/sd/out.bin", "rb");
@@ -165,21 +191,35 @@ void app_main() {
     
     load_batch(true);
     
-    /* Start the second thread */
+    /* Thread to load frames */
     TaskHandle_t xDataLoader = NULL;
     xTaskCreatePinnedToCore(
         loadData,
         "SDFETCH",
         8192,
         NULL,
-        32,
+        24,
         &xDataLoader,
+        1
+    );
+    /* Thread to render frames */
+    TaskHandle_t xRender = NULL;
+    xTaskCreatePinnedToCore(
+        renderLoop,
+        "RENDER",
+        8192,
+        NULL,
+        8,
+        &xRender,
         1
     );
 
     while (true) {
-        if (read_frame()) {
+        if (avaliable > 0) {
             disp_flush();
+            idx += 1;
+            idx %= DRAW_BUFFERS;
+            avaliable -= 1;
         }
     }
 }
